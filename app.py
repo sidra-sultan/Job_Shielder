@@ -1,11 +1,13 @@
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import joblib
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
+import requests
+from bs4 import BeautifulSoup
 import streamlit as st
 
 ROOT = Path(__file__).parent
@@ -15,76 +17,95 @@ from feature_engineering import add_features
 
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="Job Shielder - Fake Job Posting Detector",
-    page_icon="🛡️",
+    page_title="Job Shielder | Enterprise Recruitment Verification",
+    page_icon=None,
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
-# --- Custom Professional CSS Styling ---
+# --- Enterprise-Grade CSS Styling (Clean, Modern, No Emojis) ---
 st.markdown(
     """
     <style>
-    /* Background and layout settings */
-    .main {
+    .stApp {
         background-color: #f8fafc;
         color: #0f172a;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     }
-    
-    /* Custom Header Styling */
-    h1, h2, h3, h4, h5 {
-        color: #0f172a !important;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    h1, h2, h3, h4 {
+        color: #0f172a;
+        font-weight: 700;
+        letter-spacing: -0.025em;
     }
-    
-    /* Metric & Insight Card Container */
     .metric-card {
-        background-color: #ffffff;
+        background: #ffffff;
         border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 20px;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-        margin-bottom: 16px;
+        border-radius: 10px;
+        padding: 18px 20px;
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.02);
     }
-    .metric-card h4 {
-        margin-top: 0;
-        color: #334155 !important;
-        font-size: 0.95rem;
-        font-weight: 600;
+    .metric-card .title {
+        color: #64748b;
+        font-size: 0.75rem;
         text-transform: uppercase;
         letter-spacing: 0.05em;
+        font-weight: 600;
+        margin-bottom: 6px;
     }
     .metric-card .value {
-        font-size: 1.8rem;
+        font-size: 1.6rem;
         font-weight: 700;
         color: #0f172a;
     }
     .metric-card .subtitle {
         color: #64748b;
-        font-size: 0.85rem;
-        margin-top: 4px;
+        font-size: 0.75rem;
+        margin-top: 2px;
     }
-
-    /* Primary Buttons */
+    .stTextInput input, .stTextArea textarea {
+        background-color: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        color: #0f172a;
+        padding: 10px 14px;
+    }
     .stButton>button {
         width: 100%;
         background-color: #2563eb;
-        color: #ffffff !important;
+        color: #ffffff;
         border-radius: 8px;
         font-weight: 600;
         padding: 10px 20px;
         border: none;
-        box-shadow: 0 2px 4px rgba(37, 99, 235, 0.2);
+        transition: background-color 0.2s ease;
     }
     .stButton>button:hover {
         background-color: #1d4ed8;
-        color: #ffffff !important;
+        color: #ffffff;
     }
-    
-    /* Table & Frame styling */
-    .stDataFrame {
+    .badge-fraud {
+        background-color: #fef2f2;
+        color: #991b1b;
+        border: 1px solid #fecaca;
+        padding: 12px 16px;
         border-radius: 8px;
-        overflow: hidden;
+        font-weight: 600;
+    }
+    .badge-legit {
+        background-color: #f0fdf4;
+        color: #166534;
+        border: 1px solid #bbf7d0;
+        padding: 12px 16px;
+        border-radius: 8px;
+        font-weight: 600;
+    }
+    .badge-uncertain {
+        background-color: #fffbeb;
+        color: #92400e;
+        border: 1px solid #fde68a;
+        padding: 12px 16px;
+        border-radius: 8px;
+        font-weight: 600;
     }
     </style>
 """,
@@ -96,351 +117,330 @@ NONE = "(not specified)"
 
 @st.cache_resource
 def load_model():
-  return joblib.load(ROOT / "models" / "job_svm.joblib")
+    return joblib.load(ROOT / "models" / "job_svm.joblib")
 
 
-@st.cache_data
-def load_options():
-  df = pd.read_csv(ROOT / "data" / "processed" / "train_fe.csv")
-  cols = [
-      "employment_type",
-      "required_experience",
-      "required_education",
-      "industry",
-      "function",
-  ]
-  return {c: [NONE] + sorted(df[c].dropna().unique().tolist()) for c in cols}
+def scrape_job_content(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return None, f"Failed to load page (Status code: {response.status_code})"
+        
+        soup = BeautifulSoup(response.text, "html.parser")
+        title_tag = soup.find("h1") or soup.find("title")
+        title = title_tag.get_text().strip() if title_tag else "Extracted Job Posting"
+        
+        paragraphs = soup.find_all("p")
+        description = "\n".join([p.get_text() for p in paragraphs]) if paragraphs else soup.get_text()
+        
+        return {
+            "title": title,
+            "company_profile": NONE,
+            "description": description,
+            "requirements": NONE,
+            "benefits": NONE,
+            "salary_range": NONE,
+            "telecommuting": 0,
+            "has_company_logo": 1,
+            "has_questions": 1,
+            "employment_type": NONE,
+            "required_experience": NONE,
+            "required_education": NONE,
+            "industry": NONE,
+            "function": NONE,
+        }, None
+    except Exception as e:
+        return None, str(e)
 
 
 def analyse(row, bundle):
-  pipe = bundle["pipeline"]
-  X = add_features(row)[ALL_FEATURES]
-  score = float(pipe.decision_function(X)[0])
-  if score >= bundle["hi"]:
-    tier = "Potentially Fraudulent"
-  elif score <= bundle["lo"]:
-    tier = "Likely Legitimate"
-  else:
-    tier = "Uncertain / Requires Manual Verification"
-
-  prep, clf = pipe.named_steps["prep"], pipe.named_steps["clf"]
-  xv = prep.transform(X)
-  xv = xv.toarray()[0] if hasattr(xv, "toarray") else xv[0]
-  contrib = xv * clf.coef_[0]
-  names = prep.get_feature_names_out()
-  order = np.argsort(contrib)
-  up = [(names[i], contrib[i]) for i in order[::-1][:8] if contrib[i] > 0]
-  down = [(names[i], contrib[i]) for i in order[:8] if contrib[i] < 0]
-  return score, tier, up, down
-
-
-def show_signals(title, items):
-  st.markdown(f"#### {title}")
-  if items:
-    st.dataframe(
-        pd.DataFrame(items, columns=["signal", "effect"]).round(3),
-        use_container_width=True,
-        hide_index=True,
-    )
-  else:
-    st.write("None")
-
-
-# --- SIDEBAR NAVIGATION ---
-with st.sidebar:
-  st.title("🛡️ Job Shielder")
-  st.caption("AI-Powered Recruitment Protection")
-  st.markdown("---")
-  page = st.radio(
-      "Navigation",
-      [
-          "Home",
-          "Job Posting Analysis",
-          "Model Performance",
-          "Limitations",
-      ],
-  )
-  st.markdown("---")
-  st.caption("v1.0 • Phase 1 (Job Postings Active)")
-
-# --- HOME PAGE ---
-if page == "Home":
-  st.title("🛡️ Job Shielder")
-  st.markdown(
-      "A machine-learning screening tool trained on the **EMSCAD**"
-      " job-posting dataset (Kaggle version). It gives a **risk assessment**,"
-      " not a verdict."
-  )
-  st.info(
-      "Phase 1 (job postings) is implemented. SMS and URL analysis are planned"
-      " for Phase 2."
-  )
-
-  st.markdown("### Dataset & Threat Analytics Overview")
-
-  # Metric Cards Row
-  m1, m2, m3, m4 = st.columns(4)
-  with m1:
-    st.markdown(
-        """
-        <div class="metric-card">
-            <h4>Total Postings Evaluated</h4>
-            <div class="value">17,880</div>
-            <div class="subtitle">EMSCAD Benchmark Dataset</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-  with m2:
-    st.markdown(
-        """
-        <div class="metric-card">
-            <h4>Legitimate Postings</h4>
-            <div class="value">17,014</div>
-            <div class="subtitle">95.16% of total data</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-  with m3:
-    st.markdown(
-        """
-        <div class="metric-card">
-            <h4>Fraudulent Postings</h4>
-            <div class="value">866</div>
-            <div class="subtitle">4.84% positive scams</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-  with m4:
-    st.markdown(
-        """
-        <div class="metric-card">
-            <h4>Detection Engine</h4>
-            <div class="value">Linear SVM</div>
-            <div class="subtitle">TF-IDF & Metadata Pipeline</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-  st.markdown("---")
-
-  # Interactive Charts Row
-  col_chart1, col_chart2 = st.columns(2)
-
-  with col_chart1:
-    # Chart 1: Dataset Balance Donut Chart
-    labels = ["Legitimate Postings", "Fraudulent Postings"]
-    values = [17014, 866]
-    fig1 = go.Figure(
-        data=[
-            go.Pie(
-                labels=labels,
-                values=values,
-                hole=0.55,
-                marker_colors=["#10b981", "#ef4444"],
-            )
-        ]
-    )
-    fig1.update_layout(
-        title_text="Dataset Class Distribution (Legitimate vs Fraud)",
-        margin=dict(l=20, r=20, t=40, b=20),
-        height=320,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-    )
-    st.plotly_chart(fig1, use_container_width=True)
-
-  with col_chart2:
-    # Chart 2: Fraud distribution by Employment Type
-    emp_df = pd.DataFrame({
-        "Employment Type": [
-            "Full-time",
-            "Part-time",
-            "Contract",
-            "Temporary",
-            "Other",
-        ],
-        "Fraud Rate (%)": [3.8, 11.2, 4.1, 7.5, 9.4],
-    })
-    fig2 = px.bar(
-        emp_df,
-        x="Employment Type",
-        y="Fraud Rate (%)",
-        title="Historical Fraud Rate by Employment Type",
-        color="Fraud Rate (%)",
-        color_continuous_scale="Reds",
-    )
-    fig2.update_layout(
-        margin=dict(l=20, r=20, t=40, b=20),
-        height=320,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-    )
-    st.plotly_chart(fig2, use_container_width=True)
-
-  st.markdown("### 🔍 Top Risk Signals Learned by Model")
-  col_sig1, col_sig2 = st.columns(2)
-
-  with col_sig1:
-    meta_df = pd.DataFrame({
-        "Feature Flag": [
-            "Missing Company Logo",
-            "No Screening Questions",
-            "Remote / Telecommuting",
-            "Unspecified Education",
-        ],
-        "Fraud Prevalence Increase": [
-            "+68%",
-            "+42%",
-            "+31%",
-            "+25%",
-        ],
-    })
-    st.markdown("**Structural Metadata Flags**")
-    st.table(meta_df)
-
-  with col_sig2:
-    text_df = pd.DataFrame({
-        "Correlated Phrasing": [
-            "Earn $XXX / week",
-            "No experience needed",
-            "Data Entry Specialist",
-            "Wire transfer / Payment",
-        ],
-        "Signal Category": [
-            "Unrealistic Pay",
-            "Low Barrier Entry",
-            "High-Target Role",
-            "Financial Anomaly",
-        ],
-    })
-    st.markdown("**High-Risk Text Keyword Associations**")
-    st.table(text_df)
-
-# --- JOB POSTING ANALYSIS PAGE ---
-elif page == "Job Posting Analysis":
-  st.title("Job Posting Analysis")
-  st.caption("Your text is only passed to the model. No links are opened or fetched.")
-
-  opts = load_options()
-  bundle = load_model()
-
-  with st.form("analysis_form"):
-    col_f1, col_f2 = st.columns(2)
-    with col_f1:
-      title = st.text_input("Job title")
-      salary_range = st.text_input("Salary range (leave empty if not given)")
-    with col_f2:
-      company_profile = st.text_area(
-          "Company profile (leave empty if not given)", height=100
-      )
-
-    description = st.text_area("Job description", height=180)
-
-    col_f3, col_f4 = st.columns(2)
-    with col_f3:
-      requirements = st.text_area("Requirements", height=120)
-    with col_f4:
-      benefits = st.text_area("Benefits", height=120)
-
-    st.markdown("##### Posting Attributes")
-    c1, c2, c3 = st.columns(3)
-    telecommuting = c1.checkbox("Remote / telecommuting")
-    has_logo = c2.checkbox("Company logo present")
-    has_questions = c3.checkbox("Screening questions present")
-
-    st.markdown("##### Categorical Details")
-    cats = {}
-    cols_cats = st.columns(3)
-    for i, (c, vals) in enumerate(opts.items()):
-      with cols_cats[i % 3]:
-        cats[c] = st.selectbox(c.replace("_", " ").title(), vals)
-
-    submitted = st.form_submit_button("Analyse")
-
-  if submitted:
-    if not description.strip():
-      st.warning("Please enter a job description.")
+    pipe = bundle["pipeline"]
+    X = add_features(row)[ALL_FEATURES]
+    score = float(pipe.decision_function(X)[0])
+    if score >= bundle["hi"]:
+        tier = "Potentially Fraudulent"
+    elif score <= bundle["lo"]:
+        tier = "Likely Legitimate"
     else:
+        tier = "Uncertain / Requires Manual Verification"
+    return score, tier
 
-      def val(v):
-        return v if str(v).strip() and v != NONE else np.nan
 
-      row = pd.DataFrame([{
-          "title": val(title),
-          "company_profile": val(company_profile),
-          "description": val(description),
-          "requirements": val(requirements),
-          "benefits": val(benefits),
-          "salary_range": val(salary_range),
-          "telecommuting": int(telecommuting),
-          "has_company_logo": int(has_logo),
-          "has_questions": int(has_questions),
-          **{c: val(v) for c, v in cats.items()},
-      }])
-      score, tier, up, down = analyse(row, bundle)
+if "scan_history" not in st.session_state:
+    st.session_state.scan_history = []
 
-      st.markdown("---")
-      st.markdown("### Risk Evaluation Outcome")
+bundle = load_model()
 
-      if tier == "Potentially Fraudulent":
-        st.error(f"🚨 **Result:** {tier}")
-      elif tier == "Likely Legitimate":
-        st.success(f"✅ **Result:** {tier}")
-      else:
-        st.warning(f"⚠️ **Result:** {tier}")
+# --- Top Navigation / Header Bar ---
+col_head1, col_head2 = st.columns([3, 1])
+with col_head1:
+    st.markdown("## Job Shielder")
+    st.markdown(
+        "<p style='color: #64748b; font-size: 0.95rem; margin-top: -8px;'>Enterprise Recruitment Verification & Fraud Analytics Platform</p>",
+        unsafe_allow_html=True,
+    )
+with col_head2:
+    st.markdown(
+        "<div style='text-align: right; padding-top: 5px;'><span style='background-color: #e2e8f0; color: #334155; padding: 4px 10px; border-radius: 6px; font-size: 0.8rem; font-weight: 600;'>System Active</span></div>",
+        unsafe_allow_html=True,
+    )
 
-      st.write(
-          f"**Model Score:** `{score:.3f}` | **Thresholds:** Legitimate <="
-          f" `{bundle['lo']:.3f}`, Fraudulent >= `{bundle['hi']:.3f}`."
-          " *(Note: Score is decision boundary distance, not a direct"
-          " percentage probability)*"
-      )
+st.markdown("---")
 
-      st.markdown("---")
-      a, b = st.columns(2)
-      with a:
-        show_signals("Pushed towards fraud", up)
-      with b:
-        show_signals("Pushed towards legitimate", down)
+# --- Enterprise Metrics Dashboard Row ---
+m1, m2, m3, m4 = st.columns(4)
+with m1:
+    st.markdown(
+        """
+        <div class="metric-card">
+            <div class="title">Dataset Corpus</div>
+            <div class="value">17,880</div>
+            <div class="subtitle">EMSCAD benchmark records</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with m2:
+    st.markdown(
+        """
+        <div class="metric-card">
+            <div class="title">Legitimate Baseline</div>
+            <div class="value">17,014</div>
+            <div class="subtitle">95.16% distribution ratio</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with m3:
+    st.markdown(
+        """
+        <div class="metric-card">
+            <div class="title">Fraud Baseline</div>
+            <div class="value">866</div>
+            <div class="subtitle">4.84% anomaly markers</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with m4:
+    st.markdown(
+        """
+        <div class="metric-card">
+            <div class="title">Classification Engine</div>
+            <div class="value">Linear SVM</div>
+            <div class="subtitle">TF-IDF metadata pipeline</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-      st.caption(
-          "These are model-based associations learned from the dataset. They"
-          " are not verified facts and do not prove fraud."
-      )
+st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
 
-# --- MODEL PERFORMANCE PAGE ---
-elif page == "Model Performance":
-  st.title("Model Performance (held-out test set)")
-  res = ROOT / "reports" / "test_results.csv"
-  if res.exists():
-    st.dataframe(pd.read_csv(res), use_container_width=True)
-  else:
-    st.info("Run the notebook cell that saves reports/test_results.csv.")
+# --- Professional Tabs Layout ---
+tab1, tab2, tab3, tab4 = st.tabs([
+    "URL Assessment", 
+    "Manual Text Entry", 
+    "Scan History Audit", 
+    "Threat Reference"
+])
 
-  tc = ROOT / "reports" / "tier_crosstab.csv"
-  if tc.exists():
-    st.subheader("Three-tier outcome vs actual label")
-    st.dataframe(pd.read_csv(tc), use_container_width=True)
+with tab1:
+    st.markdown("#### URL Content Extraction & Evaluation")
+    st.markdown("Provide a live posting URL to automatically parse text features and evaluate security risk.")
+    
+    url_input = st.text_input(
+        "Target Job URL",
+        placeholder="https://example.com/job-posting",
+        key="url_field"
+    )
+    
+    col_btn1, col_btn2 = st.columns([2, 3])
+    with col_btn1:
+        run_url_analysis = st.button("Execute Verification Scan")
 
-  st.caption(
-      "Accuracy alone is misleading here because only about 5% of postings are"
-      " fake."
-  )
+    if run_url_analysis:
+        if not url_input.strip():
+            st.warning("Please provide a valid URL endpoint.")
+        else:
+            with st.spinner("Extracting content payload and evaluating vector attributes..."):
+                scraped_data, err = scrape_job_content(url_input.strip())
+                
+                if err or not scraped_data:
+                    st.error(f"Extraction failed: {err}")
+                    st.info(
+                        "Note: Platforms such as Indeed and LinkedIn enforce automated bot restrictions. "
+                        "If a URL is blocked, please utilize the 'Manual Text Entry' tab."
+                    )
+                else:
+                    row = pd.DataFrame([scraped_data])
+                    score, tier = analyse(row, bundle)
 
-# --- LIMITATIONS PAGE ---
-else:
-  st.title("Disclaimer and Limitations")
-  st.markdown(
-      """
-    - A prediction never guarantees a job is real or fake.
-    - Missing information alone is not proof of fraud.
-    - The model learned patterns from one older dataset; new scams may look different.
-    - Some top words reflect dataset artifacts, not real scam signals.
-    - Even 'Likely Legitimate' results can be wrong; verify employers independently.
-    - Phone numbers, websites and companies are not verified by this tool.
-    """
-  )
+                    st.session_state.scan_history.insert(0, {
+                        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "Channel": "URL Extraction",
+                        "Target": scraped_data["title"][:35],
+                        "Outcome": tier,
+                        "Decision Score": round(score, 3)
+                    })
+
+                    st.markdown("---")
+                    st.markdown("#### Assessment Outcome Summary")
+
+                    res_col1, res_col2 = st.columns([1, 1])
+
+                    with res_col1:
+                        if tier == "Potentially Fraudulent":
+                            st.markdown(f"<div class='badge-fraud'>Status: {tier}</div>", unsafe_allow_html=True)
+                        elif tier == "Likely Legitimate":
+                            st.markdown(f"<div class='badge-legit'>Status: {tier}</div>", unsafe_allow_html=True)
+                        else:
+                            st.markdown(f"<div class='badge-uncertain'>Status: {tier}</div>", unsafe_allow_html=True)
+
+                        st.markdown(f"<p style='margin-top: 15px; font-size: 0.9rem; color: #334155;'>Decision Boundary Confidence Score: <b>{score:.3f}</b></p>", unsafe_allow_html=True)
+
+                    with res_col2:
+                        fig = go.Figure(go.Indicator(
+                            mode = "gauge+number",
+                            value = score,
+                            domain = {'x': [0, 1], 'y': [0, 1]},
+                            title = {'text': "Confidence Metric", 'font': {'size': 13}},
+                            gauge = {
+                                'axis': {'range': [bundle['lo'] - 2, bundle['hi'] + 2]},
+                                'bar': {'color': "#2563eb"},
+                                'steps': [
+                                    {'range': [bundle['lo'] - 2, bundle['lo']], 'color': "#ecfdf5"},
+                                    {'range': [bundle['lo'], bundle['hi']], 'color': "#fffbeb"},
+                                    {'range': [bundle['hi'], bundle['hi'] + 2], 'color': "#fef2f2"}
+                                ],
+                                'threshold': {
+                                    'line': {'color': "#b91c1c", 'width': 3},
+                                    'thickness': 0.75,
+                                    'value': bundle['hi']
+                                }
+                            }
+                        ))
+                        fig.update_layout(height=200, margin=dict(l=15, r=15, t=25, b=10), paper_bgcolor="rgba(0,0,0,0)")
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    with st.expander("Inspect Parsed Payload Data"):
+                        st.write(f"**Identified Title:** {scraped_data['title']}")
+                        st.text_area("Extracted Body Content", scraped_data["description"], height=160)
+
+with tab2:
+    st.markdown("#### Direct Text Description Evaluation")
+    st.markdown("Analyze raw job description text directly when platform scraping filters apply.")
+    
+    manual_title = st.text_input("Position Designation", placeholder="e.g. Senior Data Analyst", key="man_title")
+    manual_desc = st.text_area(
+        "Job Description Corpus",
+        placeholder="Paste full employment description content here...",
+        height=180,
+        key="man_desc"
+    )
+    
+    col_mbtn1, col_mbtn2 = st.columns([2, 3])
+    with col_mbtn1:
+        run_manual_analysis = st.button("Execute Text Audit")
+
+    if run_manual_analysis:
+        if not manual_desc.strip():
+            st.warning("Please supply valid description text.")
+        else:
+            manual_data = {
+                "title": manual_title if manual_title.strip() else "Direct Audit Position",
+                "company_profile": NONE,
+                "description": manual_desc,
+                "requirements": NONE,
+                "benefits": NONE,
+                "salary_range": NONE,
+                "telecommuting": 0,
+                "has_company_logo": 1,
+                "has_questions": 1,
+                "employment_type": NONE,
+                "required_experience": NONE,
+                "required_education": NONE,
+                "industry": NONE,
+                "function": NONE,
+            }
+            row = pd.DataFrame([manual_data])
+            score, tier = analyse(row, bundle)
+
+            st.session_state.scan_history.insert(0, {
+                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "Channel": "Manual Audit",
+                "Target": manual_data["title"][:35],
+                "Outcome": tier,
+                "Decision Score": round(score, 3)
+            })
+
+            st.markdown("---")
+            st.markdown("#### Assessment Outcome Summary")
+
+            res_col1, res_col2 = st.columns([1, 1])
+
+            with res_col1:
+                if tier == "Potentially Fraudulent":
+                    st.markdown(f"<div class='badge-fraud'>Status: {tier}</div>", unsafe_allow_html=True)
+                elif tier == "Likely Legitimate":
+                    st.markdown(f"<div class='badge-legit'>Status: {tier}</div>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<div class='badge-uncertain'>Status: {tier}</div>", unsafe_allow_html=True)
+
+                st.markdown(f"<p style='margin-top: 15px; font-size: 0.9rem; color: #334155;'>Decision Boundary Confidence Score: <b>{score:.3f}</b></p>", unsafe_allow_html=True)
+
+            with res_col2:
+                fig = go.Figure(go.Indicator(
+                    mode = "gauge+number",
+                    value = score,
+                    domain = {'x': [0, 1], 'y': [0, 1]},
+                    title = {'text': "Confidence Metric", 'font': {'size': 13}},
+                    gauge = {
+                        'axis': {'range': [bundle['lo'] - 2, bundle['hi'] + 2]},
+                        'bar': {'color': "#2563eb"},
+                        'steps': [
+                            {'range': [bundle['lo'] - 2, bundle['lo']], 'color': "#ecfdf5"},
+                            {'range': [bundle['lo'], bundle['hi']], 'color': "#fffbeb"},
+                            {'range': [bundle['hi'], bundle['hi'] + 2], 'color': "#fef2f2"}
+                        ],
+                        'threshold': {
+                            'line': {'color': "#b91c1c", 'width': 3},
+                            'thickness': 0.75,
+                            'value': bundle['hi']
+                        }
+                    }
+                ))
+                fig.update_layout(height=200, margin=dict(l=15, r=15, t=25, b=10), paper_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(fig, use_container_width=True)
+
+with tab3:
+    st.markdown("#### Scan History Audit Log")
+    st.markdown("Active session ledger tracking all evaluated employment postings.")
+    
+    if st.session_state.scan_history:
+        history_df = pd.DataFrame(st.session_state.scan_history)
+        st.dataframe(history_df, use_container_width=True, hide_index=True)
+        
+        if st.button("Purge Session Audit Log"):
+            st.session_state.scan_history = []
+            st.rerun()
+    else:
+        st.info("No prior verification sessions recorded during the active run.")
+
+with tab4:
+    st.markdown("#### Enterprise Threat Intelligence & Red Flags")
+    st.markdown("Core behavioural indicators correlated with recruitment fraud based on historical benchmark modeling.")
+    
+    tf_col1, tf_col2 = st.columns(2)
+    with tf_col1:
+        st.markdown("**Structural & Metadata Indicators**")
+        st.markdown("- **Omission of Corporate Branding:** Absence of verified logos or organizational markers.")
+        st.markdown("- **Lack of Qualification Filters:** Elimination of standard multi-stage screening protocols.")
+        st.markdown("- **Broad Geographic Scope:** Undefined remote parameters targeted at scaling victim reach.")
+    with tf_col2:
+        st.markdown("**Lexical & Financial Indicators**")
+        st.markdown("- **Unverified Compensation Structures:** Outlier salary ranges promised for low-barrier tasks.")
+        st.markdown("- **Early Transactional Demands:** References regarding equipment procurement fees or payment clearing.")
+        st.markdown("- **Ambiguous Entity Profiles:** Generic descriptive terminology lacking formal registration details.")
