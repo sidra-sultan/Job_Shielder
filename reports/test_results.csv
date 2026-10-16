@@ -1,0 +1,6 @@
+model,accuracy,precision,recall,f1,roc_auc,pr_auc
+Logistic Regression,0.967,0.605,0.924,0.731,0.991,0.888
+Linear SVM (tuned),0.988,0.922,0.83,0.874,0.989,0.919
+Multinomial NB,0.957,0.702,0.193,0.303,0.947,0.604
+Decision Tree,0.968,0.646,0.749,0.694,0.864,0.496
+Random Forest (tuned),0.98,1.0,0.591,0.743,0.992,0.917
